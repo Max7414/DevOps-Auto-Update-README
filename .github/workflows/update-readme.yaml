@@ -2,14 +2,17 @@ name: Update README Activity
 
 on:
   workflow_dispatch:    # 手動觸發
-  push:                 # push 到 main 時觸發
+  push:                 # 推到 main 觸發
     branches: [ main ]
-  pull_request:         # PR 關閉時觸發；若為 merged 才更新
+  pull_request:         # PR 關閉時觸發；僅 merged 才會繼續執行
     types: [ closed ]
 
 permissions:
-  contents: write       # 需要寫回 README.md
-  pull-requests: read
+  contents: write       # 需寫回 README.md
+  pull-requests: read   # 讀 PR 狀態
+  # issues/metadata 會由 GitHub 預設 read 權限處理；若組織策略嚴格可顯式加上：
+  # issues: read
+  # metadata: read
 
 concurrency:
   group: update-readme
@@ -17,7 +20,7 @@ concurrency:
 
 jobs:
   build:
-    # PR 事件僅在「已合併」時執行；其他事件照常執行
+    # 只有在 PR 事件且 merged==true 時才跑；其他事件（push/手動）照常跑
     if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
@@ -25,7 +28,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: false  # 不用預設 GITHUB_TOKEN 推，改用 PAT
+          persist-credentials: false  # 避免使用 GITHUB_TOKEN 推送，改用 PAT（REPO_TOKEN）
 
       - name: Generate activity markdown
         id: gen
@@ -52,6 +55,7 @@ jobs:
             const fmtDate = (s) => new Date(s).toISOString().slice(0,10);
 
             let lines = [];
+
             if (merged.length) {
               lines.push("### Merged PRs");
               for (const p of merged) {
@@ -65,7 +69,7 @@ jobs:
               for (const c of latestCommits) {
                 const sha = c.sha.slice(0,7);
                 const msg = (c.commit.message || "").split("\n")[0];
-              const when = c.commit.author?.date ? fmtDate(c.commit.author.date) : "";
+                const when = c.commit.author?.date ? fmtDate(c.commit.author.date) : "";
                 lines.push(`- \`${sha}\` ${msg} — ${when}`);
               }
               lines.push("");
@@ -73,35 +77,42 @@ jobs:
 
             return lines.length ? lines.join("\n") : "_No recent activity_";
 
-      - name: Replace README section
+      - name: Replace README section (safe heredoc)
         run: |
-          node -e "
+          node <<'NODE'
           const fs = require('fs');
           const p = 'README.md';
           const start = '<!--START_SECTION:activity-->';
           const end = '<!--END_SECTION:activity-->';
           const md = process.env.MARKDOWN || '';
           let s = fs.readFileSync(p, 'utf8');
+
+          // 使用模板字串 + 安全的字面量邊界
           const re = new RegExp(`${start}[\\s\\S]*?${end}`, 'm');
+
           if (!re.test(s)) {
             console.error('Markers not found in README.md');
-            process.exit(2); // 沒有標記就 fail（品質把關）
+            process.exit(2); // 當作品質把關：沒有標記就失敗
           }
+
           const block = `${start}\n${md}\n${end}`;
           const out = s.replace(re, block);
+
           if (out !== s) {
             fs.writeFileSync(p, out);
             console.log('README updated.');
           } else {
             console.log('No changes needed.');
           }
-          "
+          NODE
         env:
           MARKDOWN: ${{ steps.gen.outputs.result }}
 
       - name: Commit & push (using least-priv PAT)
         run: |
           set -e
+
+          # 若沒有檔案變更，直接結束
           if git diff --quiet; then
             echo "No change to commit."
             exit 0
@@ -112,7 +123,7 @@ jobs:
           git add README.md
           git commit -m "chore(readme): auto-update [skip ci]"
 
-          # 使用 PAT 推送，避免在 log 顯示 token
+          # 以 PAT 推送，避免在 log 顯示 token
           git remote set-url origin https://x-access-token:${REPO_TOKEN}@github.com/${GITHUB_REPOSITORY}.git
           git push origin HEAD:main
         env:
