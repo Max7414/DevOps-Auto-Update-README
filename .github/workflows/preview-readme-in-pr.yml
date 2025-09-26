@@ -1,0 +1,86 @@
+name: Preview README Activity in PR
+
+on:
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate preview markdown
+        id: gen
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            // 可依需要調整：只看本 repo 的 merged PR 與 commits
+            const { owner, repo } = context.repo;
+
+            async function backoff(fn, tries=4, base=500) {
+              let i=0;
+              for(;;){
+                try { return await fn(); }
+                catch(e){
+                  const status = e.status || e.response?.status;
+                  if(!(status===403 || status===429) || i>=tries) throw e;
+                  const ms = Math.round(base * Math.pow(2, i) * (1 + Math.random()));
+                  core.info(`Rate limited, backoff ${ms}ms (attempt ${i+1}/${tries})`);
+                  await new Promise(r=>setTimeout(r, ms));
+                  i++;
+                }
+              }
+            }
+
+            const prs = await backoff(() => github.paginate(
+              github.rest.pulls.list, { owner, repo, state: 'closed', per_page: 50 }
+            ));
+            const merged = prs.filter(p => p.merged_at).slice(0,5);
+
+            const commits = await backoff(() => github.paginate(
+              github.rest.repos.listCommits, { owner, repo, per_page: 10 }
+            ));
+            const latest = commits.slice(0,5);
+
+            const dt = s => new Date(s).toISOString().slice(0,10);
+            let lines = [];
+            if (merged.length) {
+              lines.push("### Merged PRs");
+              for (const p of merged) lines.push(`- #${p.number} **${p.title}** — ${dt(p.merged_at)}`);
+              lines.push("");
+            }
+            if (latest.length) {
+              lines.push("### Latest Commits");
+              for (const c of latest) lines.push(`- \`${c.sha.slice(0,7)}\` ${(c.commit.message||'').split('\n')[0]}`);
+              lines.push("");
+            }
+            return lines.length ? lines.join("\n") : "_No recent activity_";
+
+      - name: Upsert PR comment (preview)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request.number;
+            const tag = '<!--preview-readme-activity-->';
+            const body = tag + '\n' +
+              '### README Preview (will be inserted between markers)\n\n```\n' +
+              process.env.MARKDOWN + '\n```';
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments, { owner, repo, issue_number: pr }
+            );
+            const old = comments.find(c => c.user.type === 'Bot' && c.body?.includes(tag));
+            if (old) {
+              await github.rest.issues.deleteComment({ owner, repo, comment_id: old.id });
+            }
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr, body });
+        env:
+          MARKDOWN: ${{ steps.gen.outputs.result }}
