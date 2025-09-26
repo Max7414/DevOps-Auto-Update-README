@@ -1,0 +1,21 @@
+name: Validate README Markers
+
+on:
+  pull_request:
+    paths: [ "README.md" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check markers
+        run: |
+          set -e
+          grep -q "<!--START_SECTION:activity-->" README.md
+          grep -q "<!--END_SECTION:activity-->" README.md
+          echo "Markers OK."
